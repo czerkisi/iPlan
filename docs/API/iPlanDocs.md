@@ -17,7 +17,7 @@ Installation
 
 1.  Clone the repository:
 
-`git clone https://github.com/<repository-url>.git`
+`git clone https://github.com/czerkisi/iPlan.git`
 
 2.  Install the dependencies:
 
