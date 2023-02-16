@@ -1,11 +1,21 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const validator = require("validator");
+const validator = require('validator');
+const passport = require('passport');
+const LocalStrategy = require('passport-local').Strategy;
+const crypto = require('crypto');
+const session = require('express-session');
 
 mongoose.connect('mongodb://localhost/iplan', { useNewUrlParser: true });
 
 const app = express();
 app.use(express.json());
+app.use(session({
+    secret: 'your-secret-key',
+    resave: false,
+    saveUninitialized: false
+}));
+
 
 Event = new mongoose.Schema({
     summary: {
@@ -17,12 +27,6 @@ Event = new mongoose.Schema({
     start: {
         type: Date,
         required: [true, "Event start date is required"],
-        validate: {
-            validator: function (value) {
-                return value >= this.created;
-            },
-            message: "Event start date must be after the created date",
-        },
     },
     end: {
         type: Date,
@@ -117,18 +121,20 @@ Event = new mongoose.Schema({
     },
 });
 
-
 const CalendarSchema = new mongoose.Schema({
-    username: {
+    creator: {
         type: String,
         required: true,
-        unique: true,
+    },
+    name: {
+        type: String,
+        required: true,
     },
     events: [Event],
     productId: {
         type: String,
         default: function() {
-            return `-//iPlan API//NONSGML ${this.username}//EN`;
+            return `-//iPlan API//NONSGML ${this.name}//EN`;
         }
     },
     version: {
@@ -143,23 +149,129 @@ const CalendarSchema = new mongoose.Schema({
         type: String,
         default: "PUBLISH",
     },
+    uid: {
+        type: String,
+        immutable: true,
+        default: function() {
+            return `${this.creator}${crypto.randomBytes(16).toString('hex')}${this.name}`
+        }
+    }
+});
+
+const UserSchema = new mongoose.Schema({
+    username: String,
+    password: String,
+    calendars: {
+        type: [CalendarSchema],
+        default: []
+    }
+});
+
+const sessionKeySchema = new mongoose.Schema({
+    sessionKey: String,
+    expirationDate: Number,
+    username: String
 });
 
 const calendarModel = mongoose.model('ICal', CalendarSchema);
+const userModel = mongoose.model('Users', UserSchema);
+const sessionKeyModel = mongoose.model('SessionKeys', sessionKeySchema)
+
+passport.use(new LocalStrategy(function(username, password, done) {
+    userModel.findOne({ username: username }, function(err, user) {
+        if (err) { return done(err); }
+        if (!user) { return done(null, false); }
+        if (user.password !== password) { return done(null, false); }
+        return done(null, user);
+    });
+}));
+
+app.post('/login', (req, res, next) => {
+    passport.authenticate('local', (err, user, info) => {
+        if (err) {
+            return next(err);
+        }
+        if (!user) {
+            return res.status(401).send({ error: 'Incorrect username or password' });
+        }
+        req.logIn(user, (err) => {
+            if (err) {
+                return next(err);
+            }
+            const rawKey = generateSessionKey();
+            const oneWeekFromNow = Date.now() + (7 * 24 * 60 * 60 * 1000);
+            const sessionKey = new sessionKeyModel({
+                key: rawKey,
+                expirationDate: oneWeekFromNow
+            });
+
+            sessionKey.save().then(key => {
+                res.cookie('sessionKey', rawKey, { httpOnly: true, secure: true });
+                return res.status(200).send({ success: 'Login successful' });
+            }).catch(error => {
+                return res.status(500).send({ error: `Error in creating Session Key: ${error.message}` });
+            })
+        });
+    })(req, res, next);
+});
+
+app.post('/createUser', (req, res) => {
+    const username = req.body.username;
+    if (!username){
+        return res.status(400).send({ error: 'Missing username in body' });
+    }
+    const password = req.body.password;
+    if (!password){
+        return res.status(400).send({ error: 'Missing password in body' });
+    }
+    const newUser = new userModel({
+        username: username,
+        password: password
+    });
+    newUser.save()
+        .then(user => {
+        return res.status(201).send({ status: `User: ${user.username} was created`});
+        })
+        .catch(error => {
+            return res.status(500).send({ error: `User was not created: ${error.message}` });
+        });
+})
+
+const generateSessionKey = () => {
+    return crypto.randomBytes(32).toString('hex');
+}
+passport.serializeUser(function(user, done) {
+    done(null, user.id);
+});
+
+passport.deserializeUser(function(id, done) {
+    userModel.findById(id, function(err, user) {
+        done(err, user);
+    });
+});
 
 app.get('/events', (req, res) => {
     const username = req.query.username;
+    const calendarName = req.query.calendarName;
     if (!username){
-        return res.status(400).send({ error: 'Missing username parameter' });
+        return res.status(400).send({ error: 'Missing user parameter' });
+    }
+    if (!calendarName){
+        return res.status(400).send({ error: 'Missing calendar name parameter' });
     }
 
     // retrieve the iCal file with the specified ID from MongoDB
-    calendarModel.findOne({ username: username })
-        .then((icalDoc) => {
-            if (!icalDoc){
-                return res.status(404).send({ error: 'iCal file not found' });
+    userModel.findOne({ username: username })
+        .then((user) => {
+            if (!user){
+                return res.status(404).send({ error: 'User not found' });
             }
-            return res.status(200).send({ events: icalDoc.events});
+            const calendar = user.calendars.find(c => c.name === calendarName);
+            if (!calendar) {
+                res.status(404).send({ error: 'Calendar not found' });
+            } else {
+                res.send({ events: calendar.events});
+            }
         })
         .catch((err) => {
             return res.status(500).send({ error: 'Error retrieving events from database' });
@@ -168,20 +280,28 @@ app.get('/events', (req, res) => {
 
 app.post('/events', (req, res) => {
     const username = req.query.username;
+    const calendarName = req.query.calendarName;
     if (!username){
-        return res.status(400).send({ error: 'Missing username parameter' });
+        return res.status(400).send({ error: 'Missing user parameter' });
+    }
+    if (!calendarName){
+        return res.status(400).send({ error: 'Missing calendar name parameter' });
     }
     const data = req.body;
     if (!data){
         return res.status(400).send({ error: 'Missing Body' });
     }
-    calendarModel.findOne({ username: username })
-        .then(calendar => {
-            if (!calendar) {
-                return res.status(400).send({ error: `User does not exist` });
+    userModel.findOne({ username: username })
+        .then((user) => {
+            if (!user){
+                return res.status(404).send({ error: 'User not found' });
+            }
+            const calendar = user.calendars.find(c => c.name === calendarName);
+            if (!calendar){
+                return res.status(404).send({ error: 'Calendar not found' });
             }
             calendar.events.push(data);
-            return calendar.save();
+            return user.save();
         })
         .then(calendar => {
             return res.status(201).send({ calendar: calendar });
@@ -189,27 +309,33 @@ app.post('/events', (req, res) => {
         .catch(error => {
             return res.status(500).send({ error: `iCal Event was not added: ${error.message}` });
         });
-});
+})
 
 app.put('/events', (req, res) => {
     const username = req.query.username;
-    if (!username){
-        return res.status(400).send({ error: 'Missing username parameter' });
-    }
-    const data = req.body;
-    if (!data){
-        return res.status(400).send({ error: 'Missing data in Body' });
-    }
+    const calendarName = req.query.calendarName;
     const eventId = req.query.eventId;
     if (!eventId){
         return res.status(400).send({ error: 'Missing eventId in query parameter' });
     }
+    if (!username){
+        return res.status(400).send({ error: 'Missing user parameter' });
+    }
+    if (!calendarName){
+        return res.status(400).send({ error: 'Missing calendar name parameter' });
+    }
 
-    calendarModel.findOne({ username: username })
-        .then(calendar => {
-            if (!calendar) {
-                return res.status(400).send({ error: `User does not exist` });
+    const data = req.body;
+    if (!data){
+        return res.status(400).send({ error: 'Missing data in Body' });
+    }
+
+    userModel.findOne({ username: username })
+        .then((user) => {
+            if (!user){
+                return res.status(404).send({ error: 'User not found' });
             }
+            const calendar = user.calendars.find(c => c.name === calendarName);
             const existingEventIndex = calendar.events.findIndex(e => e.uid === eventId);
             if (existingEventIndex === -1) {
                 return res.status(400).send({ error: `Event does not exist` });
@@ -227,19 +353,24 @@ app.put('/events', (req, res) => {
 
 app.delete('/events', (req, res) => {
     const username = req.query.username;
-    if (!username){
-        return res.status(400).send({ error: 'Missing username parameter' });
-    }
+    const calendarName = req.query.calendarName;
     const eventId = req.query.eventId;
     if (!eventId){
         return res.status(400).send({ error: 'Missing eventId in query parameter' });
     }
+    if (!username){
+        return res.status(400).send({ error: 'Missing user parameter' });
+    }
+    if (!calendarName){
+        return res.status(400).send({ error: 'Missing calendar name parameter' });
+    }
 
-    calendarModel.findOne({ username: username })
-        .then(calendar => {
-            if (!calendar) {
-                return res.status(400).send({ error: 'User does not exist' });
+    userModel.findOne({ username: username })
+        .then((user) => {
+            if (!user){
+                return res.status(404).send({ error: 'User not found' });
             }
+            const calendar = user.calendars.find(c => c.name === calendarName);
             const eventIndex = calendar.events.findIndex(event => event.uid === eventId);
             if (eventIndex === -1) {
                 return res.status(400).send({ error: `Event with id ${eventId} does not exist` });
@@ -255,10 +386,10 @@ app.delete('/events', (req, res) => {
         });
 });
 
-app.get('/:username.ics', (req, res) => {
-    const username = req.params.username;
+app.get('/:uid.ics', (req, res) => {
+    const uid = req.params.uid;
 
-    iCalFile(username)
+    iCalFile(uid)
         .then((icalFile) => {
             return res.set('Content-Type', 'text/calendar').send(icalFile);
         }).catch(error => {
@@ -267,8 +398,8 @@ app.get('/:username.ics', (req, res) => {
     });
 });
 
-iCalFile = async (username) => {
-    const calendar = await calendarModel.findOne({ username });
+iCalFile = async (uid) => {
+    const calendar = await calendarModel.findOne({ uid: uid});
 
     let icalendar = "BEGIN:VCALENDAR\n";
     icalendar += "PRODID:" + calendar.productId + "\n";
@@ -300,23 +431,64 @@ const formatDate = (date) => {
     return date.toISOString().replace(/-|:|\.\d{3}/g, "");
 };
 
-app.post('/create', (req, res) => {
-    const username = req.query.username;
+function isValidSessionKey(sessionKey) {
+    sessionKeyModel.findOne({ key: sessionKey}).then(sessionKey => {
+        if (!sessionKey){
+            return {
+                valid: false,
+            }
+        } else if (sessionKey.expirationDate > Date.now()){
+            return {
+                valid: false
+            }
+        } else {
+            return {
+                valid: true,
+                username: sessionKey.username
+            }
+        }
+    })
+
+    // Return true if the session key is valid, false otherwise
+    return true;
+}
+
+app.post('/createCalendar', (req, res) => {
+    // const sessionKey = req.cookies.sessionKey;
+    // const username = isValidSessionKey(sessionKey).username;
+    const username = 'czerkman';
+    const name = req.query.calendarName;
+
     if (!username){
-        return res.status(400).send({ error: 'Missing username parameter' });
+       return res.status(401).send( { error: 'Unauthorized access to create a calendar'});
+    }
+    if (!name){
+        return res.status(400).send({ error: 'Missing calendar name parameter' });
     }
 
-    const iCal = new calendarModel({
-        username: username,
+    const newCalendar = new calendarModel({
+        creator: username,
+        name: name,
         events: []
     });
 
-    iCal.save()
-        .then(calendar => {
-            return res.status(201).send({ calendar: calendar });
+    userModel.findOne({ username: username })
+        .then((user) => {
+            if (!user){
+                return res.status(404).send({ error: 'User not found' });
+            }
+            user.calendars.push(newCalendar);
+            user.save()
+                .then(calendar => {
+                    return res.status(201).send({ calendar: calendar });
+                })
+                .catch(error => {
+                    return res.status(500).send({ error: `iCal Calendar was not created: ${error.message}` });
+                });
+
         })
         .catch(error => {
-            return res.status(500).send({ error: `iCal Calendar was not created: ${error.message}` });
+            return res.status(500).send({ error: `Calendar was not created: ${error.message}` });
         });
 });
 
