@@ -1,31 +1,23 @@
-# Configuration used in SDL and other upper-level courses
-# (where # marks comment lines)
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# common build products to be ignored
-*.o
-*.obj
-*.class
-*.exe
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
 
-# common IDE-generated files and folders to ignore
-.idea/workspace.xml
-.idea/lib.xml
-bin/
-out/
-.classpath
-.idea/garden-czerkisi-watermana.iml
-# uncomment following for courses in which Eclipse .project files are not committed
-# .project
+# testing
+/coverage
 
-# ignore automatically generated files created by some applications, OSs
-*.bak
-*.log
-*.ldb
-~*
-.DS_Store*
-._*
-Thumbs.db
+# production
+/build
 
-# You can add additional patterns. You can also specify that a file should
-#   NOT be ignored by starting it with !; for example:
-# !.classpath
+# misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/iPlan.iml" filepath="$PROJECT_DIR$/.idea/iPlan.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/iplan-next.iml" filepath="$PROJECT_DIR$/.idea/iplan-next.iml" />
     </modules>
   </component>
 </project>
